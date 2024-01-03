@@ -64,7 +64,7 @@ publishdevimage: ## Build and publish tailscale image to location specified by $
 	@test "${REPO}" != "ghcr.io/tailscale/tailscale" || (echo "REPO=... must not be ghcr.io/tailscale/tailscale" && exit 1)
 	@test "${REPO}" != "tailscale/k8s-operator" || (echo "REPO=... must not be tailscale/k8s-operator" && exit 1)
 	@test "${REPO}" != "ghcr.io/tailscale/k8s-operator" || (echo "REPO=... must not be ghcr.io/tailscale/k8s-operator" && exit 1)
-	TAGS=latest REPOS=${REPO} PUSH=true TARGET=client ./build_docker.sh
+	TAGS=0.0.2 REPOS=${REPO} PUSH=true TARGET=client ./build_docker.sh
 
 publishdevoperator: ## Build and publish k8s-operator image to location specified by ${REPO}
 	@test -n "${REPO}" || (echo "REPO=... required; e.g. REPO=ghcr.io/${USER}/tailscale" && exit 1)
@@ -72,7 +72,7 @@ publishdevoperator: ## Build and publish k8s-operator image to location specifie
 	@test "${REPO}" != "ghcr.io/tailscale/tailscale" || (echo "REPO=... must not be ghcr.io/tailscale/tailscale" && exit 1)
 	@test "${REPO}" != "tailscale/k8s-operator" || (echo "REPO=... must not be tailscale/k8s-operator" && exit 1)
 	@test "${REPO}" != "ghcr.io/tailscale/k8s-operator" || (echo "REPO=... must not be ghcr.io/tailscale/k8s-operator" && exit 1)
-	TAGS=latest REPOS=${REPO} PUSH=true TARGET=operator ./build_docker.sh
+	TAGS=0.0.2 REPOS=${REPO} PUSH=true TARGET=operator ./build_docker.sh
 
 help: ## Show this help
 	@echo "\nSpecify a command. The choices are:\n"

@@ -20,6 +20,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/tailscale/wireguard-go/tun"
 	"github.com/vishvananda/netlink"
+	"go4.org/netipx"
 	"golang.org/x/exp/slices"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsaddr"
@@ -453,18 +454,18 @@ func (n *fakeIPTablesRunner) AddLoopbackRule(addr netip.Addr) error {
 }
 
 func (n *fakeIPTablesRunner) AddBase(tunname string) error {
-	if err := n.AddBase4(tunname); err != nil {
+	if err := n.addBase4(tunname); err != nil {
 		return err
 	}
 	if n.HasIPV6() {
-		if err := n.AddBase6(tunname); err != nil {
+		if err := n.addBase6(tunname); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (n *fakeIPTablesRunner) AddBase4(tunname string) error {
+func (n *fakeIPTablesRunner) addBase4(tunname string) error {
 	curIPT := n.ipt4
 	newRules := []struct{ chain, rule string }{
 		{"filter/ts-input", fmt.Sprintf("! -i %s -s %s -j RETURN", tunname, tsaddr.ChromeOSVMRange().String())},
@@ -482,7 +483,7 @@ func (n *fakeIPTablesRunner) AddBase4(tunname string) error {
 	return nil
 }
 
-func (n *fakeIPTablesRunner) AddBase6(tunname string) error {
+func (n *fakeIPTablesRunner) addBase6(tunname string) error {
 	curIPT := n.ipt6
 	newRules := []struct{ chain, rule string }{
 		{"filter/ts-forward", fmt.Sprintf("-i %s -j MARK --set-mark %s/%s", tunname, linuxfw.TailscaleSubnetRouteMark, linuxfw.TailscaleFwmarkMask)},
@@ -1022,8 +1023,8 @@ func TestCIDRDiff(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		slices.SortFunc(added, func(a, b netip.Prefix) bool { return a.Addr().Less(b.Addr()) })
-		slices.SortFunc(deleted, func(a, b netip.Prefix) bool { return a.Addr().Less(b.Addr()) })
+		slices.SortFunc(added, netipx.ComparePrefix)
+		slices.SortFunc(deleted, netipx.ComparePrefix)
 		if !reflect.DeepEqual(added, tc.wantAdd) {
 			t.Errorf("added = %v, want %v", added, tc.wantAdd)
 		}

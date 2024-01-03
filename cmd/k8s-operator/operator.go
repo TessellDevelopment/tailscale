@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/yaml"
+
 	"tailscale.com/client/tailscale"
 	"tailscale.com/hostinfo"
 	"tailscale.com/ipn"
@@ -66,6 +67,7 @@ func main() {
 		priorityClassName  = defaultEnv("PROXY_PRIORITY_CLASS_NAME", "")
 		tags               = defaultEnv("PROXY_TAGS", "tag:k8s")
 		shouldRunAuthProxy = defaultBool("AUTH_PROXY", false)
+		usenft             = defaultBool("OPERATOR_USENFT", false)
 	)
 
 	var opts []kzap.Opts
@@ -207,6 +209,7 @@ waitOnline:
 		proxyImage:             image,
 		proxyPriorityClassName: priorityClassName,
 		logger:                 zlog.Named("service-reconciler"),
+		useNft:                 usenft,
 	}
 
 	reconcileFilter := handler.EnqueueRequestsFromMapFunc(func(_ context.Context, o client.Object) []reconcile.Request {
@@ -285,6 +288,7 @@ type ServiceReconciler struct {
 	proxyImage             string
 	proxyPriorityClassName string
 	logger                 *zap.SugaredLogger
+	useNft                 bool
 }
 
 type tsClient interface {
@@ -625,6 +629,13 @@ func (a *ServiceReconciler) reconcileSTS(ctx context.Context, logger *zap.Sugare
 			Name:  "TS_HOSTNAME",
 			Value: hostname,
 		})
+	if a.useNft {
+		container.Env = append(container.Env,
+			corev1.EnvVar{
+				Name:  "TS_TEST_USENFT",
+				Value: "true",
+			})
+	}
 	ss.ObjectMeta = metav1.ObjectMeta{
 		Name:      headlessSvc.Name,
 		Namespace: a.operatorNamespace,
@@ -640,6 +651,12 @@ func (a *ServiceReconciler) reconcileSTS(ctx context.Context, logger *zap.Sugare
 		"app": string(parentSvc.UID),
 	}
 	ss.Spec.Template.Spec.PriorityClassName = a.proxyPriorityClassName
+	docker_creds := corev1.LocalObjectReference{
+		Name: "dockerhub-creds",
+	}
+	ss.Spec.Template.Spec.ImagePullSecrets = []corev1.LocalObjectReference{
+		docker_creds,
+	}
 	logger.Debugf("reconciling statefulset %s/%s", ss.GetNamespace(), ss.GetName())
 	return createOrUpdate(ctx, a.Client, a.operatorNamespace, &ss, func(s *appsv1.StatefulSet) { s.Spec = ss.Spec })
 }

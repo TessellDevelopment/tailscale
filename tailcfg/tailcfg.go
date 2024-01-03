@@ -3,11 +3,12 @@
 
 package tailcfg
 
-//go:generate go run tailscale.com/cmd/viewer --type=User,Node,Hostinfo,NetInfo,Login,DNSConfig,RegisterResponse,DERPHomeParams,DERPRegion,DERPMap,DERPNode,SSHRule,SSHAction,SSHPrincipal,ControlDialPlan,Location --clonefunc
+//go:generate go run tailscale.com/cmd/viewer --type=User,Node,Hostinfo,NetInfo,Login,DNSConfig,RegisterResponse,DERPHomeParams,DERPRegion,DERPMap,DERPNode,SSHRule,SSHAction,SSHPrincipal,ControlDialPlan,Location,UserProfile --clonefunc
 
 import (
 	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -102,7 +103,9 @@ type CapabilityVersion int
 //   - 63: 2023-06-08: Client understands SSHAction.AllowRemotePortForwarding.
 //   - 64: 2023-07-11: Client understands s/CapabilityTailnetLockAlpha/CapabilityTailnetLock
 //   - 65: 2023-07-12: Client understands DERPMap.HomeParams + incremental DERPMap updates with params
-const CurrentCapabilityVersion CapabilityVersion = 65
+//   - 66: 2023-07-23: UserProfile.Groups added (available via WhoIs)
+//   - 67: 2023-07-25: Client understands PeerCapMap
+const CurrentCapabilityVersion CapabilityVersion = 67
 
 type StableID string
 
@@ -175,6 +178,27 @@ type UserProfile struct {
 	// Roles exists for legacy reasons, to keep old macOS clients
 	// happy. It JSON marshals as [].
 	Roles emptyStructJSONSlice
+
+	// Groups contains group identifiers for any group that this user is
+	// a part of and that the coordination server is configured to tell
+	// your node about. (Thus, it may be empty or incomplete.)
+	// There's no semantic difference between a nil and an empty list.
+	// The list is always sorted.
+	Groups []string `json:",omitempty"`
+}
+
+func (p *UserProfile) Equal(p2 *UserProfile) bool {
+	if p == nil && p2 == nil {
+		return true
+	}
+	if p == nil || p2 == nil {
+		return false
+	}
+	return p.ID == p2.ID &&
+		p.LoginName == p2.LoginName &&
+		p.DisplayName == p2.DisplayName &&
+		p.ProfilePicURL == p2.ProfilePicURL &&
+		(len(p.Groups) == 0 && len(p2.Groups) == 0 || reflect.DeepEqual(p.Groups, p2.Groups))
 }
 
 type emptyStructJSONSlice struct{}
@@ -213,10 +237,20 @@ type Node struct {
 	Addresses    []netip.Prefix // IP addresses of this Node directly
 	AllowedIPs   []netip.Prefix // range of IP addresses to route to this node
 	Endpoints    []string       `json:",omitempty"` // IP+port (public via STUN, and local LANs)
-	DERP         string         `json:",omitempty"` // DERP-in-IP:port ("127.3.3.40:N") endpoint
-	Hostinfo     HostinfoView
-	Created      time.Time
-	Cap          CapabilityVersion `json:",omitempty"` // if non-zero, the node's capability version; old servers might not send
+
+	// DERP is this node's home DERP region ID integer, but shoved into an
+	// IP:port string for legacy reasons. The IP address is always "127.3.3.40"
+	// (a loopback address (127) followed by the digits over the letters DERP on
+	// a QWERTY keyboard (3.3.40)). The "port number" is the home DERP region ID
+	// integer.
+	//
+	// TODO(bradfitz): simplify this legacy mess; add a new HomeDERPRegionID int
+	// field behind a new capver bump.
+	DERP string `json:",omitempty"` // DERP-in-IP:port ("127.3.3.40:N") endpoint
+
+	Hostinfo HostinfoView
+	Created  time.Time
+	Cap      CapabilityVersion `json:",omitempty"` // if non-zero, the node's capability version; old servers might not send
 
 	// Tags are the list of ACL tags applied to this node.
 	// Tags take the form of `tag:<value>` where value starts
@@ -677,11 +711,12 @@ type NetInfo struct {
 	// Empty means not checked.
 	PCP opt.Bool
 
-	// PreferredDERP is this node's preferred DERP server
-	// for incoming traffic. The node might be be temporarily
-	// connected to multiple DERP servers (to send to other nodes)
-	// but PreferredDERP is the instance number that the node
-	// subscribes to traffic at.
+	// PreferredDERP is this node's preferred (home) DERP region ID.
+	// This is where the node expects to be contacted to begin a
+	// peer-to-peer connection. The node might be be temporarily
+	// connected to multiple DERP servers (to speak to other nodes
+	// that are located elsewhere) but PreferredDERP is the region ID
+	// that the node subscribes to traffic at.
 	// Zero means disconnected or unknown.
 	PreferredDERP int
 
@@ -1149,7 +1184,70 @@ type CapGrant struct {
 	// Caps are the capabilities the source IP matched by
 	// FilterRule.SrcIPs are granted to the destination IP,
 	// matched by Dsts.
-	Caps []string `json:",omitempty"`
+	// Deprecated: use CapMap instead.
+	Caps []PeerCapability `json:",omitempty"`
+
+	// CapMap is a map of capabilities to their values.
+	// The key is the capability name, and the value is a list of
+	// values for that capability.
+	CapMap PeerCapMap `json:",omitempty"`
+}
+
+// PeerCapability is a capability granted to a node by a FilterRule.
+// It's a string, but its meaning is application-defined.
+// It must be a URL, like "https://tailscale.com/cap/file-sharing-target" or
+// "https://example.com/cap/read-access".
+type PeerCapability string
+
+const (
+	// PeerCapabilityFileSharingTarget grants the current node the ability to send
+	// files to the peer which has this capability.
+	PeerCapabilityFileSharingTarget PeerCapability = "https://tailscale.com/cap/file-sharing-target"
+	// PeerCapabilityFileSharingSend grants the ability to receive files from a
+	// node that's owned by a different user.
+	PeerCapabilityFileSharingSend PeerCapability = "https://tailscale.com/cap/file-send"
+	// PeerCapabilityDebugPeer grants the ability for a peer to read this node's
+	// goroutines, metrics, magicsock internal state, etc.
+	PeerCapabilityDebugPeer PeerCapability = "https://tailscale.com/cap/debug-peer"
+	// PeerCapabilityWakeOnLAN grants the ability to send a Wake-On-LAN packet.
+	PeerCapabilityWakeOnLAN PeerCapability = "https://tailscale.com/cap/wake-on-lan"
+	// PeerCapabilityIngress grants the ability for a peer to send ingress traffic.
+	PeerCapabilityIngress PeerCapability = "https://tailscale.com/cap/ingress"
+)
+
+// PeerCapMap is a map of capabilities to their optional values. It is valid for
+// a capability to have no values (nil slice); such capabilities can be tested
+// for by using the HasCapability method.
+//
+// The values are opaque to Tailscale, but are passed through from the ACLs to
+// the application via the WhoIs API.
+type PeerCapMap map[PeerCapability][]json.RawMessage
+
+// UnmarshalCapJSON unmarshals each JSON value in cm[cap] as T.
+// If cap does not exist in cm, it returns (nil, nil).
+// It returns an error if the values cannot be unmarshaled into the provided type.
+func UnmarshalCapJSON[T any](cm PeerCapMap, cap PeerCapability) ([]T, error) {
+	vals, ok := cm[cap]
+	if !ok {
+		return nil, nil
+	}
+	out := make([]T, 0, len(vals))
+	for _, v := range vals {
+		var t T
+		if err := json.Unmarshal(v, &t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, nil
+}
+
+// HasCapability reports whether c has the capability cap.
+// This is used to test for the existence of a capability, especially
+// when the capability has no values.
+func (c PeerCapMap) HasCapability(cap PeerCapability) bool {
+	_, ok := c[cap]
+	return ok
 }
 
 // FilterRule represents one rule in a packet filter.
@@ -1616,8 +1714,15 @@ type ControlIPCandidate struct {
 	Priority int `json:",omitempty"`
 }
 
-// Debug are instructions from the control server to the client
-// to adjust debug settings.
+// Debug are instructions from the control server to the client to adjust debug
+// settings.
+//
+// Deprecated: these should no longer be used. They're a weird mix of declartive
+// and imperative. The imperative ones should be c2n requests instead, and the
+// declarative ones (at least the bools) should generally be self
+// Node.Capabilities.
+//
+// TODO(bradfitz): start migrating the imperative ones to c2n requests.
 type Debug struct {
 	// LogHeapPprof controls whether the client should log
 	// its heap pprof data. Each true value sent from the server
@@ -1854,25 +1959,6 @@ const (
 
 	// CapabilityTailnetLock indicates the node may initialize tailnet lock.
 	CapabilityTailnetLock = "https://tailscale.com/cap/tailnet-lock"
-
-	// Inter-node capabilities as specified in the MapResponse.PacketFilter[].CapGrants.
-
-	// CapabilityFileSharingTarget grants the current node the ability to send
-	// files to the peer which has this capability.
-	CapabilityFileSharingTarget = "https://tailscale.com/cap/file-sharing-target"
-	// CapabilityFileSharingSend grants the ability to receive files from a
-	// node that's owned by a different user.
-	CapabilityFileSharingSend = "https://tailscale.com/cap/file-send"
-	// CapabilityDebugPeer grants the ability for a peer to read this node's
-	// goroutines, metrics, magicsock internal state, etc.
-	CapabilityDebugPeer = "https://tailscale.com/cap/debug-peer"
-	// CapabilityWakeOnLAN grants the ability to send a Wake-On-LAN packet.
-	CapabilityWakeOnLAN = "https://tailscale.com/cap/wake-on-lan"
-	// CapabilityIngress grants the ability for a peer to send ingress traffic.
-	CapabilityIngress = "https://tailscale.com/cap/ingress"
-	// CapabilitySSHSessionHaul grants the ability to receive SSH session logs
-	// from a peer.
-	CapabilitySSHSessionHaul = "https://tailscale.com/cap/ssh-session-haul"
 
 	// Funnel warning capabilities used for reporting errors to the user.
 
@@ -2283,6 +2369,8 @@ type PeerChange struct {
 //
 // Mnemonic: 3.3.40 are numbers above the keys D, E, R, P.
 const DerpMagicIP = "127.3.3.40"
+
+var DerpMagicIPAddr = netip.MustParseAddr(DerpMagicIP)
 
 // EarlyNoise is the early payload that's sent over Noise but before the HTTP/2
 // handshake when connecting to the coordination server.
