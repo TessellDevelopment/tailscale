@@ -86,3 +86,9 @@ see:
 ## Legal
 
 WireGuard is a registered trademark of Jason A. Donenfeld.
+
+Steps to push images
+export REPO=tesselldev/tessell-tailscale-proxy-image
+make publishdevimage
+export REPO=tesselldev/tessell-tailscale-operator
+make publishdevoperator
